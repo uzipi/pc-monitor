@@ -73,6 +73,62 @@ def test_refresh_now_is_synchronous():
     assert ref.get()[0] == 42
 
 
+def test_refresher_stops_after_one_success():
+    """`stop_after_success`:查成功一次就收工,不再反复拉起 PowerShell。"""
+    calls: list[int] = []
+
+    def refresh():
+        calls.append(1)
+        return "ok"
+
+    ref = BackgroundRefresher(
+        refresh, interval=0.05, name="t-once", stop_after_success=True
+    )
+    ref.start()
+    try:
+        assert ref.wait_ready(2.0) is True
+        time.sleep(0.3)  # 够它再转好几轮了
+        assert len(calls) == 1
+        assert ref.get()[0] == "ok"
+    finally:
+        ref.stop()
+
+
+def test_refresher_retries_when_it_keeps_failing():
+    """一次都没成功就不算成功,还得按间隔重试。"""
+    calls: list[int] = []
+
+    def refresh():
+        calls.append(1)
+        raise RuntimeError("还是不行")
+
+    ref = BackgroundRefresher(
+        refresh, interval=0.05, name="t-once-fail", stop_after_success=True
+    )
+    ref.start()
+    try:
+        time.sleep(0.3)
+        assert len(calls) > 1
+        assert ref.get()[1] == "还是不行"
+    finally:
+        ref.stop()
+
+
+def test_smart_script_avoids_the_slow_storage_cmdlets():
+    """守护这条性能约定:别再退回 `Get-PhysicalDisk` 那条 0.9 秒 CPU 的老路。
+
+    `Get-PhysicalDisk` / `Get-StorageReliabilityCounter` 实测要 0.9 秒 CPU
+    一次,非管理员还直接报错;换成直接问 WMI 之后只要 0.25 秒。
+    """
+    from pcmonitor.collectors import thermal
+
+    script = thermal._PHYSICAL_DISK_SCRIPT
+    assert "Get-PhysicalDisk" not in script
+    assert "Get-StorageReliabilityCounter" not in script
+    assert "MSFT_PhysicalDisk" in script
+    assert "MSFT_StorageReliabilityCounter" in script
+
+
 def test_smart_source_reads_cache_not_powershell(monkeypatch):
     """没开后台线程时 sample() 不该去跑 PowerShell,直接返回空列表。"""
     from pcmonitor.collectors import thermal

@@ -23,8 +23,9 @@ CPU / 内存 / GPU 的占用与温度、磁盘 SMART、网速、进程榜,一屏
   自动装、自动提权,用户不用再去 pawnio.eu 下载。
 - **两种显示模式**:启动时选一次 —— 概览模式一屏看完(含硬盘 IO 与温度),
   详细模式把每核温度、SMART、网卡、进程榜全摆出来。
-- **不卡界面**:SMART、SMBIOS 这类要拉起 PowerShell 的查询(单次 1 秒多)
-  全部放到后台线程,采样线程只读缓存,刷新节奏稳定在 ~80ms 一帧。
+- **不卡界面**:SMART、SMBIOS 这类要拉起 PowerShell 的查询全部放到后台线程,
+  采样线程只读缓存,刷新节奏稳定在 ~18ms 一帧。
+- **几乎不占 CPU**:整个程序约占单核 4%,折合整机 0.2%(见「性能占用」)。
 - **降级诚实**:拿不到的指标显示"不可用",绝不编造数字;每个传感器都标注来源。
 - **零重型依赖**:运行时只依赖 `psutil`,其余全是标准库。
 
@@ -79,16 +80,44 @@ pc-monitor --mode detail     # 详细
 | 内存 | 页面文件用量 | psutil | |
 | 内存条 | 厂商/型号/容量/频率/电压/形态 | SMBIOS `Win32_PhysicalMemory` | |
 | 内存条 | 温度、时序 | — | **当前拿不到,见「已知限制」** |
-| GPU | 占用率、显存控制器占用、频率、显存频率 | `nvidia-smi` | 仅 NVIDIA |
-| GPU | 温度、功耗、风扇 | `nvidia-smi` | |
-| GPU | 显存用量 / 占用率 | `nvidia-smi` | |
-| GPU | PCIe 链路代数与位宽(当前/上限) | `nvidia-smi` | |
-| 磁盘 | 每块物理盘的温度、健康度、通电时长、磨损 | `Get-StorageReliabilityCounter` | SMART,不需要管理员权限 |
+| GPU | 占用率、显存控制器占用、频率、显存频率 | NVML | 仅 NVIDIA,拿不到才退回 `nvidia-smi` |
+| GPU | 温度、功耗、风扇 | NVML | |
+| GPU | 显存用量 / 占用率 | NVML | |
+| GPU | PCIe 链路代数与位宽(当前/上限) | NVML | |
+| 磁盘 | 每块物理盘的温度、健康度、通电时长、磨损 | WMI `MSFT_StorageReliabilityCounter` | SMART;温度要管理员权限 |
 | 磁盘 | 每块物理盘的读写速率 | psutil | |
 | 磁盘 | 各分区容量占用 | psutil | |
 | 网络 | 各网卡上下行速率 | psutil | 物理网卡单独汇总,避免虚拟网卡重复计数 |
 | 进程 | CPU / 内存占用 Top N | psutil | 归一化到 0~100% |
 | 主机 | 运行时间、系统版本 | psutil | |
+
+## 性能占用
+
+本机(20 逻辑核)实测,默认 2 秒刷新间隔、详细模式:
+
+| | 优化前 | 优化后 |
+| --- | --- | --- |
+| 单帧采样 + 渲染 | 78 ms | **18 ms** |
+| 整个程序占单核 | 约 18% | **约 4.4%** |
+| 折合整机 CPU | 约 0.9% | **约 0.22%** |
+
+也就是说,开着它打游戏,CPU 占用在任务管理器里基本看不出来。
+
+优化主要来自四处:
+
+1. **GPU 改用 NVML**。原来每帧拉一次 `nvidia-smi` 子进程,一次 47ms,
+   占了整帧的六成。直接 ctypes 调 `nvml.dll` 之后是 0.1ms。
+2. **硬盘 SMART 换查询方式**。`Get-PhysicalDisk | Get-StorageReliabilityCounter`
+   实测一次要 0.9 秒 CPU,而且非管理员身份下直接报错。改成直接问 WMI
+   (`MSFT_PhysicalDisk` + `MSFT_StorageReliabilityCounter` 关联类)只要
+   0.25 秒,于是刷新间隔从 30 秒调回 10 秒,硬盘温度更实时,CPU 反而更低。
+3. **后台查询各降其频**。内存条型号运行期不会变,查成功一次就停;
+   ACPI 热区参考价值低,120 秒一次;SMART 10 秒一次。
+4. **去掉没用的开销**。进程列表不再预取 `username`(要开 token 查 SID,
+   206 个进程要 7.4ms,界面上根本不显示);分区列表缓存 30 秒;
+   `GetPerformanceInfo` 一帧只调一次(带 0.5 秒缓存)而不是三次。
+
+细节见下面的「技术要点」。
 
 ## 安装
 
@@ -169,7 +198,10 @@ pc-monitor --csv --once > 快照.csv
   SIO 通道,当前未实现。
 - **ACPI 热区温度**不随负载变化,只作兜底参考。界面上单列一行标注为"近似",
   不会跟真实的 MSR 温度混在一起显示。
-- GPU 指标依赖 `nvidia-smi`,AMD/Intel 核显暂不支持。
+- GPU 指标依赖 NVML / `nvidia-smi`(NVIDIA 专用),AMD/Intel 核显暂不支持。
+- **硬盘温度需要管理员权限**。型号、总线类型、健康度普通用户就能读到,
+  但温度、通电时长、磨损来自存储可靠性计数器,要管理员(程序默认会自动提权,
+  `--no-msr` 模式下不提权,这几项会显示"不可用")。
 
 ## 技术要点
 
@@ -220,10 +252,9 @@ Windows SDK 头文件里的 `PERFORMANCE_INFORMATION` 只有 88 字节,
 
 ### 慢查询为什么不能放在采集路径里
 
-硬盘 SMART(`Get-StorageReliabilityCounter`)和内存条信息
-(`Get-CimInstance Win32_PhysicalMemory`)都要拉起一个 PowerShell 进程,
-实测单次 1.0~1.4 秒。早期版本直接在采样线程里同步调用,
-结果就是界面每 10 秒就整体卡住一秒多,动画直接顿住。
+硬盘 SMART 和内存条信息(`Get-CimInstance Win32_PhysicalMemory`)都要
+拉起一个 PowerShell 进程,实测单次 0.2~1.4 秒。早期版本直接在采样线程里
+同步调用,结果就是界面每 10 秒就整体卡住一秒多,动画直接顿住。
 
 现在这两个查询都交给 `collectors/base.py` 里的 `BackgroundRefresher`:
 守护线程定期刷新并写入缓存,采样线程只做一次加锁读。
@@ -232,6 +263,34 @@ Windows SDK 头文件里的 `PERFORMANCE_INFORMATION` 只有 88 字节,
 进程采集也踩过同样的坑:`process_iter(["status"])` 和逐个进程的
 `num_threads()` 各要 200ms+,改用一次 `GetPerformanceInfo` 拿总量后,
 进程榜从 511ms 降到 18ms。
+
+### 为什么硬盘 SMART 不走 `Get-PhysicalDisk`
+
+这是性能优化里最费劲的一处。三种写法实测(同一台机器,同一个 PowerShell
+进程启动开销约 80ms):
+
+| 写法 | 墙钟 | 子进程 CPU | 非管理员 |
+| --- | --- | --- | --- |
+| `Get-PhysicalDisk \| Get-StorageReliabilityCounter` | 1270 ms | 900 ms | 直接报错,什么都读不到 |
+| `Get-CimInstance MSFT_PhysicalDisk` | 270 ms | 250 ms | 可以 |
+| `Get-CimInstance MSFT_PhysicalDisk` + `Get-CimAssociatedInstance MSFT_StorageReliabilityCounter` | 600 ms | **250 ms** | 型号/健康度可以,温度要管理员 |
+
+所以最终用第三种:直接问 WMI,温度走 `MSFT_StorageReliabilityCounter`
+关联类。CPU 降到 1/3,还顺带修好了"非管理员什么都读不到"的问题。
+
+> 顺带记一笔:Windows 上没有便宜的原生 SMART 读取办法。
+> `IOCTL_STORAGE_QUERY_PROPERTY` 的 `StorageDeviceTemperatureProperty`
+> 只有 NVMe / USB-SAT 驱动支持,SATA 盘直接 `ERROR_INVALID_FUNCTION`;
+> ATA 直通(`IOCTL_SCSI_PASS_THROUGH_DIRECT`)和老的 IDE 寄存器直通
+> (`SMART_RCV_DRIVE_DATA`)在 AHCI 驱动上同样不支持。
+> 所以 SATA 盘的温度只能靠 WMI,没有更省的办法。
+
+### 内存条信息为什么要查一次就停
+
+`Win32_PhysicalMemory` 查一次要 0.25 秒 CPU,但内存条的型号、频率、
+容量运行期根本不会变。所以 `BackgroundRefresher` 加了个
+`stop_after_success`:成功一次就停,失败才按间隔重试。
+同理 ACPI 热区(参考价值低)放到 120 秒一次,SMART 10 秒一次。
 
 ## 目录结构
 
@@ -247,7 +306,8 @@ pcmonitor/
     base.py           增量计数器 + 后台刷新器
     cpu.py            CPU + MSR 读取与解码
     memory.py         内存、提交量、内存条信息
-    gpu.py            nvidia-smi 解析
+    gpu.py            GPU 采集(NVML 优先,nvidia-smi 兜底)
+    nvml.py           NVML 客户端(ctypes 直调 nvml.dll)
     disk.py           分区容量 + 物理盘读写速率
     network.py        各网卡上下行速率
     process.py        进程 Top N
