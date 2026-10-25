@@ -16,7 +16,7 @@ import sys
 import time
 from typing import Any, Optional
 
-from . import __version__
+from . import __version__, driver
 from .models import Snapshot
 from .monitor import Monitor
 from .ui import Dashboard, Theme, terminal_size
@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-color", action="store_true", help="禁用颜色")
     parser.add_argument(
         "--no-msr", action="store_true", help="禁用 PawnIO/MSR 读取(不需要装驱动)"
+    )
+    parser.add_argument(
+        "--no-driver-install",
+        action="store_true",
+        help="即使没装 PawnIO 驱动也不自动安装(默认首次运行会自动装,会弹 UAC)",
     )
     parser.add_argument(
         "--no-process", action="store_true", help="不采集进程列表(更快)"
@@ -122,6 +127,69 @@ _CSV_HEADER = [
     "disk_temp_c",
     "disk_health",
 ]
+
+
+# ---------------------------------------------------------------- 驱动
+
+
+def _info(message: str) -> None:
+    print(message)
+
+
+def _warn(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _can_elevate(args: argparse.Namespace) -> bool:
+    """要不要为了读 MSR 自我提权。
+
+    `--json` / `--csv` 的输出是往标准输出里流的(可能被重定向到管道或文件),
+    重新起一个进程会把这条流弄丢,所以这两种模式不自动提权,只提示用户。
+    """
+    return not (args.json or args.csv)
+
+
+def prepare_driver(args: argparse.Namespace) -> bool:
+    """确保 PawnIO 驱动可用。
+
+    返回 False 表示已经用管理员身份重新启动过了,调用方应该马上退出,
+    让提权后的那个实例接着跑。
+
+    流程:
+    1. 没装驱动 -> 用内置的官方安装器提权装上(会弹 UAC)。
+    2. 装好了但当前进程没权限 -> 以管理员身份重新启动自己。
+
+    为了只弹一次 UAC,没装驱动时优先"先把自己提权重开",让提权后的实例
+    去装驱动(它已经是管理员了,装的时候不会再弹窗)。
+    """
+    if args.no_msr:
+        return True
+
+    if not driver.is_installed():
+        if args.no_driver_install:
+            _warn("提示:未检测到 PawnIO 驱动,按 --no-driver-install 跳过安装,MSR 指标不可用。")
+            return True
+        if _can_elevate(args) and not driver.is_elevated():
+            _info("首次运行需要安装 PawnIO 驱动,正在以管理员身份重新启动……")
+            if driver.elevate_self():
+                return False
+        _info("正在安装 PawnIO 驱动(会弹出 UAC 授权窗口,请点“是”)……")
+        result = driver.install()
+        if result.ok:
+            _info("PawnIO 驱动安装完成。")
+        else:
+            _warn(f"PawnIO 驱动安装失败:{result.message}")
+            _warn("可以手动到 https://pawnio.eu/ 下载安装,其余指标不受影响。")
+            return True
+
+    hr = driver.probe_access()
+    if hr == driver.ACCESS_DENIED_HRESULT and not driver.is_elevated():
+        if _can_elevate(args):
+            _info("读取 MSR 需要管理员权限,正在以管理员身份重新启动……")
+            if driver.elevate_self():
+                return False
+        _warn("提示:当前不是管理员身份,MSR 指标(CPU 温度/功耗)不可用。")
+    return True
 
 
 # ---------------------------------------------------------------- 主循环
@@ -259,6 +327,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     old_cp = setup_output_encoding()
     if not args.no_color and sys.stdout.isatty():
         enable_vt()
+
+    if not prepare_driver(args):
+        # 已经以管理员身份重开了一个实例,这边直接收工
+        restore_output_encoding(old_cp)
+        return 0
 
     monitor = Monitor(enable_msr=not args.no_msr, top=args.top)
     if args.no_process:

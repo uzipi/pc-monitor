@@ -4,6 +4,12 @@
 单文件(onefile)模式:目标机器不需要装 Python。
 vendor/pawnio 下的 PawnIOLib.dll 和 AMX 模块必须一起打进去,
 否则读不到 MSR,CPU 温度/功耗会变成"不可用"。
+
+PawnIO_setup.exe 是官方安装器(上游允许原样转发),打进去之后
+用户在没装驱动的机器上首次运行就能自动装,不用再去 pawnio.eu 下载。
+它必须以 PawnIO_setup.exe 这个名字存在:官方安装器会用
+wcsstr(argv[0], "uninstall.exe") 判断自己是安装器还是卸载器,
+名字(或路径)里出现 "uninstall.exe" 的话 -install 会被抵消掉。
 """
 
 from pathlib import Path
@@ -21,11 +27,16 @@ if modules_dir.is_dir():
     for module in sorted(modules_dir.glob("*.bin")):
         binaries.append((str(module), "vendor/pawnio/modules"))
 
+datas = []
+installer = vendor / "PawnIO_setup.exe"
+if installer.is_file():
+    datas.append((str(installer), "vendor/pawnio"))
+
 a = Analysis(
     ["main.py"],
     pathex=[str(project_root)],
     binaries=binaries,
-    datas=[],
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

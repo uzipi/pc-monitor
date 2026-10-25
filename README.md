@@ -19,6 +19,8 @@ CPU / 内存 / GPU 的占用与温度、磁盘 SMART、网速、进程榜,一屏
   不是 ACPI 热区那种"永远不变"的假值。
 - **不依赖 .NET**:绕过 LibreHardwareMonitor 的 C# 库,直接用 ctypes 调
   PawnIO 官方 C API,纯 Python 实现,打包体积小、启动快。
+- **驱动不用用户操心**:官方安装器已经打进 exe,第一次运行自动检测、
+  自动装、自动提权,用户不用再去 pawnio.eu 下载。
 - **不卡界面**:SMART、SMBIOS 这类要拉起 PowerShell 的查询(单次 1 秒多)
   全部放到后台线程,采样线程只读缓存,刷新节奏稳定在 ~80ms 一帧。
 - **降级诚实**:拿不到的指标显示"不可用",绝不编造数字;每个传感器都标注来源。
@@ -51,20 +53,7 @@ CPU / 内存 / GPU 的占用与温度、磁盘 SMART、网速、进程榜,一屏
 
 ## 安装
 
-### 1. 装 PawnIO 驱动(读 CPU 温度/功耗的前提)
-
-到 <https://pawnio.eu/> 下载官方安装包并安装,装完**不需要**重启。
-
-驱动是按 `Manual` 启动的,程序第一次访问时会由服务自动拉起。
-如果提示没有权限,用管理员身份运行本程序。
-
-> PawnIO 是微软封掉 WinRing0 之后的替代方案,只开放受控的 ring0 能力。
-> 它需要关闭 Secure Boot / VBS(部分机器上),安装包会提示。
-
-不装驱动也能用:`--no-msr` 会跳过所有 MSR 读取,
-其余指标(占用率、显存、SMART、网速、进程)照常工作。
-
-### 2. 运行
+### 1. 运行
 
 直接下载 `dist/pc-monitor.exe` 双击,或在命令行里跑:
 
@@ -79,6 +68,30 @@ pip install -r requirements.txt
 python -m pcmonitor
 ```
 
+### 2. PawnIO 驱动(读 CPU 温度/功耗的前提)
+
+**不用再去 <https://pawnio.eu/> 下载**。程序自带官方安装器
+(`PawnIO_setup.exe`,上游在二进制里明确写了 "This installer can be
+redistributed unmodified."),exe 里已经打进去了。
+
+第一次运行时会:
+
+1. 检测驱动装没装(查注册表 `Services\PawnIO` + `Enum\ROOT\PAWNIO`);
+2. 没装的话,以管理员身份重新启动自己(弹一次 UAC,点"是");
+3. 在提权后的那个实例里静默安装驱动 —— 全程只弹**一次** UAC;
+4. 装完直接进主界面,CPU 温度/电压/功耗立刻就有值。
+
+想手动装也可以,双击 `vendor/pawnio/PawnIO_setup.exe` 即可,或者去
+pawnio.eu 下载官方安装包。装完**不需要**重启。
+
+驱动是按 `Manual` 启动的,程序第一次访问时会由服务自动拉起。
+
+> PawnIO 是微软封掉 WinRing0 之后的替代方案,只开放受控的 ring0 能力。
+> 它的驱动是 **WHQL 签名**的,Secure Boot 开着也能装,不需要关 VBS。
+
+不装驱动也能用:`--no-msr` 会跳过所有 MSR 读取,
+其余指标(占用率、显存、SMART、网速、进程)照常工作。
+
 ## 命令行参数
 
 | 参数 | 说明 |
@@ -89,6 +102,7 @@ python -m pcmonitor
 | `--csv` | 输出 CSV(适合丢进 Excel 做时序分析) |
 | `--no-color` | 关闭颜色 |
 | `--no-msr` | 不读 MSR(不需要装 PawnIO 驱动) |
+| `--no-driver-install` | 没装驱动也不自动装(默认首次运行会自动装) |
 | `--no-process` | 不采集进程列表(更快) |
 | `--top 10` | 进程榜取前 N 名 |
 | `--width 100` | 强制界面宽度 |
@@ -139,6 +153,24 @@ C API:`pawnio_open` / `pawnio_load` / `pawnio_execute` / `pawnio_close`,
    公式:`temp = TjMax - ((status >> 16) & 0x7F)`,且要求 `status & 0x80000000`。
    封装温度的 MSR 地址是 `0x1B1`,不是 `0x1B0`。
 
+### 装驱动的三个坑
+
+1. **官方安装器靠自己的文件名判断角色**。反汇编可以看到它调用的是
+   `wcsstr(argv[0], "uninstall.exe")` —— 路径里只要出现 "uninstall.exe",
+   它就认为自己是卸载器,于是 `-install` 会被自己抵消掉,弹一句
+   "Please specify either -install or -uninstall" 就以 `0xC000000D` 退出。
+   所以内置副本必须叫 `PawnIO_setup.exe`,而且**存放路径里也不能出现
+   "uninstall.exe"`(`driver.py` 里还留了一道检查,防止源码运行时把项目
+   放在这种路径下)。
+2. **驱动装好之后仍然要管理员权限**。PawnIO 暴露的是 MSR / I/O 端口这类
+   ring0 能力,设备对象只放行管理员;普通进程打开会拿到
+   `0x80070005`(ACCESS_DENIED)。所以非管理员启动时程序要自我提权。
+   而 `--json` / `--csv` 的输出是往标准输出里流的(可能被重定向到管道),
+   重开进程会把这条流弄丢,所以这两种模式只提示、不自动提权。
+3. **检测不能只看服务项**。卸载到一半会留下 `Services\PawnIO`,但设备节点
+   已经被摘掉,这时驱动其实已经不能用了,得重新装。所以 `is_installed()`
+   要求服务项和 `Enum\ROOT\PAWNIO` **同时**存在。
+
 ### `GetPerformanceInfo` 的坑
 
 Windows SDK 头文件里的 `PERFORMANCE_INFORMATION` 只有 88 字节,
@@ -166,6 +198,7 @@ Windows SDK 头文件里的 `PERFORMANCE_INFORMATION` 只有 88 字节,
 ```
 pcmonitor/
   cli.py              命令行入口(--json/--csv/TUI)
+  driver.py           PawnIO 驱动的检测、安装、提权
   monitor.py          把各采集器汇总成一帧 Snapshot
   models.py           所有快照数据结构
   resources.py        打包后/源码运行时的资源路径

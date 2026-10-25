@@ -1,8 +1,8 @@
 @echo off
 rem ---------------------------------------------------------------------
 rem  Build a single-file exe: dist\pc-monitor.exe
-rem  The target machine needs no Python, but does need the PawnIO driver
-rem  for CPU temperature / power readings.
+rem  The target machine needs no Python and no manual driver download:
+rem  the official PawnIO setup is bundled and installed on first run.
 rem
 rem  NOTE: keep this file pure ASCII. cmd.exe reads .bat files with the
 rem  console ANSI codepage; UTF-8 Chinese comments desync the parser and
@@ -20,6 +20,13 @@ if exist ".venv\Scripts\python.exe" (
 
 if not exist "vendor\pawnio\PawnIOLib.dll" (
     echo [ERROR] Missing vendor\pawnio\PawnIOLib.dll - see vendor\pawnio\README.md
+    exit /b 1
+)
+
+if not exist "vendor\pawnio\PawnIO_setup.exe" (
+    echo [ERROR] Missing vendor\pawnio\PawnIO_setup.exe - see vendor\pawnio\README.md
+    echo         The exe ships this installer so users never have to
+    echo         download the PawnIO driver by hand.
     exit /b 1
 )
 

@@ -9,8 +9,8 @@ LHM 依赖 pythonnet + .NET Framework 运行时,打包体积大、启动慢,而�
 直接走 PawnIO 的官方 C API 只有三个调用,纯 ctypes 即可,无任何运行时依赖。
 
 使用前提:系统里需要安装并运行 PawnIO 内核驱动。
-    https://github.com/n3v/PawnIO
-检测:注册表 HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\PawnIO
+    https://github.com/namazso/PawnIO
+检测与安装:见 pcmonitor/driver.py(程序自带官方安装器,首次运行会自动装)
 """
 
 from __future__ import annotations
@@ -84,25 +84,10 @@ class PawnIoClient:
 
     @staticmethod
     def is_installed() -> bool:
-        """通过注册表判断 PawnIO 是否已安装。"""
-        if sys.platform != "win32":
-            return False
-        try:
-            import winreg
+        """PawnIO 驱动是否已经安装(注册表 + 服务双重确认)。"""
+        from .. import driver
 
-            for hive, path in (
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"),
-                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"),
-            ):
-                try:
-                    with winreg.OpenKey(hive, path) as key:
-                        winreg.QueryValueEx(key, "DisplayVersion")
-                        return True
-                except OSError:
-                    continue
-        except Exception:
-            pass
-        return False
+        return driver.is_installed()
 
     # ---------------------------------------------------------------- 生命周期
 

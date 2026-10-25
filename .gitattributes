@@ -8,8 +8,9 @@
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
 
-# 二进制:PawnIO 的驱动、AMX 模块、用户态库
+# 二进制:PawnIO 的驱动、AMX 模块、用户态库、官方安装器
 *.dll binary
 *.sys binary
+*.exe binary
 *.ico binary
 vendor/pawnio/modules/*.bin binary
