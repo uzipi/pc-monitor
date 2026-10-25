@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 跑测试 (windows-latest)
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      # 特意放在没有 N 卡驱动、没有 PawnIO 驱动的干净机器上跑。
+      #
+      # 这不是随便挑的环境 —— 开发机上有 nvidia-smi,`shutil.which` 找得到它,
+      # 于是"nvidia-smi 降级路径"的用例其实会走真实分支,测不到想要的东西;
+      # 换到干净的 runner 上才会暴露出来(2026-10-25 第一次跑 CI 就是这么挂的)。
+      # 依赖宿主机硬件的测试就是不该在宿主机上信。
+      - name: 跑测试
+        run: python -m pytest tests -q

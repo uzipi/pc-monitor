@@ -5,36 +5,22 @@
 
 这些用例专门测 nvidia-smi 这条降级路径,所以一律 `use_nvml=False` 关掉
 NVML —— 否则在有 N 卡的机器上会直接走 NVML,根本轮不到假的 subprocess。
+
+nvidia-smi 存不存在由 `fake_smi` 夹具接管(见 conftest.py):不光替换
+`subprocess.run`,连 `shutil.which` 一起替换,不然在没装 N 卡驱动的机器上
+这条路径压根不会被执行,用例会"通过"但什么都没测到。
 """
 
 from __future__ import annotations
 
-from pcmonitor.collectors import gpu as gpu_module
 from pcmonitor.collectors.gpu import GpuCollector
 
 
-class _FakeProc:
-    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
-        self.stdout = stdout
-        self.returncode = returncode
-        self.stderr = stderr
-
-
-def _patch_run(monkeypatch, stdout: str, returncode: int = 0, stderr: str = ""):
-    def fake_run(cmd, **kwargs):  # noqa: ANN001
-        fake_run.cmd = cmd
-        return _FakeProc(stdout, returncode, stderr)
-
-    monkeypatch.setattr(gpu_module.subprocess, "run", fake_run)
-    return fake_run
-
-
-def test_parses_full_row(monkeypatch):
-    row = (
+def test_parses_full_row(fake_smi):
+    fake_smi.stdout = (
         "0, NVIDIA GeForce RTX 5060 Ti, 98, 38, 70, 5539, 16311, 180.01, "
         "2625, 14001, 64, 5, 5, 8, 16\n"
     )
-    _patch_run(monkeypatch, row)
     gpus = GpuCollector(use_nvml=False).sample()
     assert len(gpus) == 1
     gpu = gpus[0]
@@ -51,9 +37,11 @@ def test_parses_full_row(monkeypatch):
     assert gpu.pcie_width_current == 8
 
 
-def test_handles_na_fields(monkeypatch):
-    row = "0, Quadro K420, [N/A], [N/A], 40, 1024, 2048, 12.5, 900, 5000, [N/A], 1, 1, 2, 2\n"
-    _patch_run(monkeypatch, row)
+def test_handles_na_fields(fake_smi):
+    fake_smi.stdout = (
+        "0, Quadro K420, [N/A], [N/A], 40, 1024, 2048, 12.5, 900, 5000, "
+        "[N/A], 1, 1, 2, 2\n"
+    )
     gpus = GpuCollector(use_nvml=False).sample()
     assert len(gpus) == 1
     gpu = gpus[0]
@@ -63,16 +51,18 @@ def test_handles_na_fields(monkeypatch):
     assert gpu.mem_percent == 50.0
 
 
-def test_non_zero_return_code_sets_error(monkeypatch):
-    _patch_run(monkeypatch, "", returncode=9, stderr="boom")
+def test_non_zero_return_code_sets_error(fake_smi):
+    fake_smi.returncode = 9
+    fake_smi.stderr = "boom"
     collector = GpuCollector(use_nvml=False)
     assert collector.sample() == []
     assert collector.error
+    # 错误信息要能看出是 nvidia-smi 报的,而不是"根本找不到 nvidia-smi"
+    assert "boom" in collector.error
 
 
-def test_query_includes_pcie_fields(monkeypatch):
-    fake = _patch_run(monkeypatch, "")
+def test_query_includes_pcie_fields(fake_smi):
     GpuCollector(use_nvml=False).sample()
-    cmd = " ".join(fake.cmd)
+    cmd = " ".join(fake_smi.cmd or [])
     assert "pcie.link.gen.current" in cmd
     assert "pcie.link.width.current" in cmd

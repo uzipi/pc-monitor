@@ -2,6 +2,8 @@
 
 真实硬件上跑不了 CI,所以这里只测"拿不到的时候怎么办"和
 "两条路径(NVML / nvidia-smi)怎么选"这些纯逻辑。
+
+nvidia-smi 那条降级路径由 `fake_smi` 夹具接管(见 conftest.py)。
 """
 
 from __future__ import annotations
@@ -14,22 +16,6 @@ from pcmonitor.collectors import gpu as gpu_module
 from pcmonitor.collectors import nvml as nvml_module
 from pcmonitor.collectors.gpu import GpuCollector
 from pcmonitor.models import GpuSnapshot
-
-
-class _FakeProc:
-    def __init__(self, stdout: str = "", returncode: int = 0, stderr: str = "") -> None:
-        self.stdout = stdout
-        self.returncode = returncode
-        self.stderr = stderr
-
-
-def _patch_smi(monkeypatch, stdout: str, returncode: int = 0, stderr: str = ""):
-    def fake_run(cmd, **kwargs):  # noqa: ANN001
-        fake_run.cmd = cmd
-        return _FakeProc(stdout, returncode, stderr)
-
-    monkeypatch.setattr(gpu_module.subprocess, "run", fake_run)
-    return fake_run
 
 
 def _patch_no_nvml(monkeypatch):
@@ -56,10 +42,9 @@ def test_close_is_safe_when_nvml_is_missing(monkeypatch):
     assert source.available is False
 
 
-def test_collector_falls_back_to_smi_when_nvml_missing(monkeypatch):
+def test_collector_falls_back_to_smi_when_nvml_missing(monkeypatch, fake_smi):
     _patch_no_nvml(monkeypatch)
-    row = "0, Quadro K420, 10, 5, 40, 1024, 2048, 12.5, 900, 5000, 20, 1, 1, 2, 2\n"
-    _patch_smi(monkeypatch, row)
+    fake_smi.stdout = "0, Quadro K420, 10, 5, 40, 1024, 2048, 12.5, 900, 5000, 20, 1, 1, 2, 2\n"
     collector = GpuCollector()
     gpus = collector.sample()
     assert len(gpus) == 1
@@ -67,9 +52,9 @@ def test_collector_falls_back_to_smi_when_nvml_missing(monkeypatch):
     assert collector.source == "nvidia-smi"
 
 
-def test_collector_prefers_nvml_over_smi(monkeypatch):
+def test_collector_prefers_nvml_over_smi(monkeypatch, fake_smi):
     """NVML 有数据时就不该再拉 nvidia-smi 子进程。"""
-    fake = _patch_smi(monkeypatch, "0, 不该被调用, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1\n")
+    fake_smi.stdout = "0, 不该被调用, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1\n"
 
     class _FakeNvml:
         available = True
@@ -91,13 +76,12 @@ def test_collector_prefers_nvml_over_smi(monkeypatch):
     assert gpus[0].name == "RTX 5060 Ti"
     assert gpus[0].usage_percent == 42.0
     assert collector.source == "NVML"
-    assert not hasattr(fake, "cmd"), "走了 NVML 就不该再调 nvidia-smi"
+    assert fake_smi.cmd is None, "走了 NVML 就不该再调 nvidia-smi"
 
 
-def test_collector_falls_back_when_nvml_returns_nothing(monkeypatch):
+def test_collector_falls_back_when_nvml_returns_nothing(monkeypatch, fake_smi):
     """NVML 初始化成功却没采到东西,要退回 nvidia-smi 兜底。"""
-    row = "0, Quadro K420, 10, 5, 40, 1024, 2048, 12.5, 900, 5000, 20, 1, 1, 2, 2\n"
-    _patch_smi(monkeypatch, row)
+    fake_smi.stdout = "0, Quadro K420, 10, 5, 40, 1024, 2048, 12.5, 900, 5000, 20, 1, 1, 2, 2\n"
 
     class _EmptyNvml:
         available = True
