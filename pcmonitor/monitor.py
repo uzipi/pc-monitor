@@ -93,6 +93,7 @@ class Monitor:
             cpu_package_c=snap.cpu.package_temp_c,
             cpu_cores=core_temps,
             gpu_temp_c=gpu_temp,
+            gpu_source=self.gpu.source,
         )
         for disk in snap.physical_disks:
             if disk.temp_c is not None:
@@ -133,3 +134,4 @@ class Monitor:
         self.cpu.close()
         self.memory.stop()
         self.thermal.stop()
+        self.gpu.close()

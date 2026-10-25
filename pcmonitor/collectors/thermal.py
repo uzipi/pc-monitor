@@ -3,7 +3,7 @@
 三类来源,优先级从高到低:
 
 1. **CPU 温度**:来自 PawnIO 读 MSR(见 cpu.py),是真实的封装/每核温度。
-2. **GPU 温度**:来自 nvidia-smi。
+2. **GPU 温度**:来自 NVML(见 nvml.py),拿不到才退回 nvidia-smi。
 3. **硬盘温度 / SMART**:来自 PowerShell 的 Get-StorageReliabilityCounter,
    底层走 SMART,不需要管理员权限也不需要额外驱动。
 4. **ACPI 热区**:兜底。实测在多数主板上这个值不随负载变化,只能当参考,
@@ -180,6 +180,7 @@ class ThermalCollector:
         cpu_package_c: Optional[float] = None,
         cpu_cores: Optional[list] = None,
         gpu_temp_c: Optional[float] = None,
+        gpu_source: str = "",
     ) -> ThermalSnapshot:
         snap = ThermalSnapshot()
 
@@ -190,7 +191,7 @@ class ThermalCollector:
             snap.cpu_cores = list(cpu_cores)
         if gpu_temp_c is not None:
             snap.gpu_temp_c = gpu_temp_c
-            snap.sources["gpu"] = "nvidia-smi"
+            snap.sources["gpu"] = gpu_source or "nvidia-smi"
 
         if self.acpi:
             zones = self.acpi.sample()

@@ -635,10 +635,12 @@ class Dashboard:
         body: list[str] = []
         for note in warnings:
             body.append(t.paint(t.warn, "! " + note))
+        # GPU 的数据来源随实现走(NVML 还是 nvidia-smi 兜底),照实标
+        gpu_source = snap.thermal.sources.get("gpu", "nvidia-smi")
         body.append(
             t.paint(
                 t.muted,
-                "按 Ctrl+C 退出  ·  数据来源:MSR(温度/功耗) / nvidia-smi(GPU) / "
+                f"按 Ctrl+C 退出  ·  数据来源:MSR(温度/功耗) / {gpu_source}(GPU) / "
                 "SMART(硬盘) / psutil(负载)",
             )
         )

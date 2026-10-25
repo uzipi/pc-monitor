@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import time
 from typing import Optional
 
 import psutil
@@ -110,11 +111,32 @@ class _PerformanceInformation(ctypes.Structure):
     ]
 
 
+#: GetPerformanceInfo 的结果缓存时间(秒)。
+#: 一次调用约 1ms,而一帧里内存和进程两个采集器各要一次,加进程数统计
+#: 一共三次。提交量/进程数这些值本来就变化很慢,半秒内复用完全够用。
+_PERF_INFO_TTL = 0.5
+
+_perf_info_cache: tuple[float, Optional[_PerformanceInformation]] = (0.0, None)
+
+
 def get_performance_info() -> Optional[_PerformanceInformation]:
     """调用 K32GetPerformanceInfo,拿不到就返回 None。
 
     用 kernel32 的 K32 前缀版本而不是 psapi.dll 的转发层,行为一致。
+    结果按 `_PERF_INFO_TTL` 缓存,避免同一帧里重复进内核。
     """
+    global _perf_info_cache
+    now = time.monotonic()
+    cached_at, cached = _perf_info_cache
+    if cached is not None and now - cached_at < _PERF_INFO_TTL:
+        return cached
+
+    info = _query_performance_info()
+    _perf_info_cache = (now, info)
+    return info
+
+
+def _query_performance_info() -> Optional[_PerformanceInformation]:
     try:
         fn = ctypes.WinDLL("kernel32", use_last_error=True).K32GetPerformanceInfo
         fn.argtypes = [ctypes.POINTER(_PerformanceInformation), ctypes.c_uint32]
@@ -139,7 +161,7 @@ def _get_commit_info() -> tuple[Optional[int], Optional[int]]:
     这是 Windows 上判断内存压力的关键指标:物理内存用完之前,
     提交量就已经先触顶,随后开始大量换页。
     """
-    info = _get_performance_info()
+    info = get_performance_info()
     if info is None or not info.PageSize:
         return None, None
     page = int(info.PageSize)
@@ -148,9 +170,14 @@ def _get_commit_info() -> tuple[Optional[int], Optional[int]]:
 
 class MemoryCollector:
     def __init__(self) -> None:
-        # SMBIOS 查询要拉起 PowerShell,约 1 秒,放后台线程刷新
+        # SMBIOS 查询要拉起 PowerShell,约 1 秒,放后台线程刷新。
+        # 内存条型号/频率运行期不会变,查成功一次就够了(stop_after_success),
+        # 免得每隔一分钟白拉起一个 PowerShell;真失败还会按间隔重试。
         self._dimm_refresher = BackgroundRefresher(
-            self._query_dimms, interval=60.0, name="dimm-info"
+            self._query_dimms,
+            interval=60.0,
+            name="dimm-info",
+            stop_after_success=True,
         )
 
     def start(self) -> None:
@@ -180,10 +207,13 @@ class MemoryCollector:
         except Exception:
             pass
 
-        snap.committed_bytes, snap.commit_limit_bytes = _get_commit_info()
-        info = _get_performance_info()
+        # 一次 GetPerformanceInfo 拿到提交量/提交上限/提交峰值,别调三次
+        info = get_performance_info()
         if info is not None and info.PageSize:
-            snap.commit_peak_bytes = int(info.CommitPeak) * int(info.PageSize)
+            page = int(info.PageSize)
+            snap.committed_bytes = int(info.CommitTotal) * page
+            snap.commit_limit_bytes = int(info.CommitLimit) * page
+            snap.commit_peak_bytes = int(info.CommitPeak) * page
         snap.dimms = self.sample_dimms()
         return snap
 
@@ -229,7 +259,7 @@ class MemoryCollector:
     def sample_dimms(self, force: bool = False) -> list[DimmInfo]:
         """内存条信息(频率/型号等),来自 SMBIOS。
 
-        查询较慢,交给后台线程每 60 秒刷新一次,这里只读缓存。
+        查询慢(要拉起 PowerShell),交给后台线程查一次,这里只读缓存。
         """
         if force:
             self._dimm_refresher.refresh_now()

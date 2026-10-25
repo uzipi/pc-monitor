@@ -3,10 +3,12 @@
 psutil 的进程 CPU 占用是"距上次调用"的增量,所以必须保留 Process 对象
 跨采样复用,每次都新建对象只会得到 0。
 
-性能上有两个坑:
+性能上有三个坑:
 * `process_iter(["status"])` 会预取每个进程的状态,200 多个进程要 200ms+。
 * 逐个进程调 `num_threads()` 更慢(实测 200 多个进程 200ms+)。
   进程数/线程数总量改用一次 GetPerformanceInfo 拿到,快一个数量级。
+* **不要预取 username**。它要开进程 token 查 SID,206 个进程实测 7.4ms,
+  而界面上根本没显示用户名 —— 预取一次直接省掉三分之一的时间。
 """
 
 from __future__ import annotations
@@ -33,7 +35,8 @@ class ProcessCollector:
         stats: list[ProcessStat] = []
         alive: dict[int, psutil.Process] = {}
 
-        for proc in psutil.process_iter(["pid", "name", "username"]):
+        # 只预取 pid 和 name。username 要开 token 查 SID,太贵而且用不上。
+        for proc in psutil.process_iter(["pid", "name"]):
             try:
                 pid = proc.info["pid"]
                 alive[pid] = proc
@@ -47,7 +50,6 @@ class ProcessCollector:
                 stat = ProcessStat(
                     pid=pid,
                     name=proc.info.get("name") or "?",
-                    username=proc.info.get("username") or "",
                 )
                 stat.cpu_percent = cached.cpu_percent(None) / self._cpu_count
                 try:

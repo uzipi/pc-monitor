@@ -1,6 +1,15 @@
 """NVIDIA 显卡采集。
 
-用 nvidia-smi 的 CSV 输出模式,一次拿到所有需要的字段。
+优先直接 ctypes 调 NVML(nvml.dll),拿不到才退回 `nvidia-smi` 子进程。
+
+一开始是用 nvidia-smi 的 CSV 输出模式,一次拿到所有需要的字段,
+但实测它一次要 30~50ms —— 贵在**进程启动 + NVML 初始化**,不是查询本身
+(加不加字段耗时几乎一样)。而这个界面每 2 秒就要刷一帧,这一项
+占了整帧采样时间的 6 成。
+
+换成直接调 nvml.dll 之后是 0.1ms,整机还少了一个进程的创建/销毁。
+nvidia-smi 保留着当降级方案:老驱动缺 NVML 接口时还能用。
+
 注意两点:
 * 部分显卡不支持某些字段(如无风扇的卡 fan.speed 会返回 "N/A"),
   所以每个字段都要容错。
@@ -14,6 +23,7 @@ import subprocess
 from typing import Optional
 
 from ..models import GpuSnapshot
+from .nvml import NvmlSource
 
 _QUERY_FIELDS = (
     "index,name,utilization.gpu,utilization.memory,temperature.gpu,"
@@ -41,17 +51,40 @@ def _to_int(text: str) -> Optional[int]:
 
 
 class GpuCollector:
-    """通过 nvidia-smi 采集 NVIDIA 显卡状态。"""
+    """采集 NVIDIA 显卡状态:优先 NVML,不行再退回 nvidia-smi。"""
 
-    def __init__(self) -> None:
+    def __init__(self, use_nvml: bool = True) -> None:
+        self._nvml = NvmlSource() if use_nvml else None
         self._exe = shutil.which("nvidia-smi")
-        self.available = self._exe is not None
-        self.error: Optional[str] = None if self.available else "未找到 nvidia-smi"
+        self.available = bool(self._nvml and self._nvml.available) or self._exe is not None
+        self.error: Optional[str] = None
+        #: 当前实际用的数据来源("NVML" / "nvidia-smi"),界面上要标注
+        self.source: str = "NVML" if (self._nvml and self._nvml.available) else "nvidia-smi"
+        if not self.available:
+            self.error = (self._nvml.error if self._nvml else None) or "未找到 nvidia-smi"
 
     def sample(self) -> list[GpuSnapshot]:
+        if self._nvml is not None and self._nvml.available:
+            gpus = self._nvml.sample()
+            if gpus:
+                self.error = None
+                self.source = "NVML"
+                return gpus
+            # NVML 明明初始化成功了却没采到东西,退回 nvidia-smi 兜底
+        if self._exe:
+            self.source = "nvidia-smi"
+            return self._sample_smi()
         if not self.available:
-            return []
+            self.error = (self._nvml.error if self._nvml else None) or "未找到 nvidia-smi"
+        return []
 
+    def close(self) -> None:
+        if self._nvml is not None:
+            self._nvml.close()
+
+    # ------------------------------------------------------------ nvidia-smi
+
+    def _sample_smi(self) -> list[GpuSnapshot]:
         cmd = [
             self._exe,
             f"--query-gpu={_QUERY_FIELDS}",

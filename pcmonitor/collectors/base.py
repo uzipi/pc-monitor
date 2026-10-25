@@ -26,6 +26,10 @@ class BackgroundRefresher:
 
     硬盘 SMART、内存条信息都要过一遍 PowerShell,单次 1 秒多。
     放在采集路径里会让界面每 10 秒卡一下,放到后台线程里就完全无感了。
+
+    `stop_after_success=True` 表示"成功一次就够了"—— 内存条型号这种
+    运行期不会变的东西,查一次就停,省得每隔一分钟拉起一个 PowerShell。
+    失败时仍然会按间隔重试。
     """
 
     def __init__(
@@ -33,10 +37,12 @@ class BackgroundRefresher:
         refresh: Callable[[], Any],
         interval: float = 10.0,
         name: str = "refresher",
+        stop_after_success: bool = False,
     ) -> None:
         self._refresh = refresh
         self._interval = interval
         self._name = name
+        self._stop_after_success = stop_after_success
         self._lock = threading.Lock()
         self._value: Any = None
         self._error: Optional[str] = None
@@ -57,16 +63,20 @@ class BackgroundRefresher:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            ok = False
             try:
                 value = self._refresh()
             except Exception as exc:  # 后台线程不能因为一次失败就退出
                 with self._lock:
                     self._error = str(exc)
             else:
+                ok = True
                 with self._lock:
                     self._value = value
                     self._error = None
             self._ready.set()
+            if ok and self._stop_after_success:
+                break
             self._stop.wait(self._interval)
 
     def wait_ready(self, timeout: float = 3.0) -> bool:

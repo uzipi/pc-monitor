@@ -179,7 +179,6 @@ class ThermalSnapshot:
 class ProcessStat:
     pid: int
     name: str
-    username: str = ""
     cpu_percent: float = 0.0
     memory_bytes: int = 0
     memory_percent: float = 0.0
