@@ -205,6 +205,9 @@ pc-monitor --csv --once > 快照.csv
 
 ## 技术要点
 
+> 下面是常用的几处关键取舍。完整的开发过程、踩坑记录、性能实测和走过的弯路,
+> 见 [开发记录与技术总结(v0.1)](docs/DEVELOPMENT-v0.1.md)。
+
 ### 为什么不用 LibreHardwareMonitor
 
 LHM 的 C# 库需要 pythonnet + .NET Framework 运行时:打包后体积大、启动慢,
@@ -319,6 +322,7 @@ pcmonitor/
     dashboard.py      面板渲染
 vendor/pawnio/        第三方二进制(见该目录下的 README)
 tests/                pytest 用例
+docs/                 开发记录与技术总结
 tools/ghfetch.py      GitHub 抓取小工具(raw 域名不通时的备用)
 ```
 
@@ -329,6 +333,9 @@ scripts\setup.bat     # 建虚拟环境、装依赖、跑测试
 python -m pytest tests -q
 scripts\build.bat     # 打包成 dist\pc-monitor.exe
 ```
+
+文档:[开发记录与技术总结(v0.1)](docs/DEVELOPMENT-v0.1.md) —— 实现细节、踩过的坑、
+性能实测数据。
 
 ## 许可证
 
