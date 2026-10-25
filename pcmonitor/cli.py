@@ -4,6 +4,8 @@
 * 默认:终端仪表盘,全屏刷新。
 * `--json`:每帧输出一个 JSON 对象,方便接入别的工具。
 * `--csv`:输出 CSV,方便丢进 Excel 或做时序分析。
+
+仪表盘又有两种显示模式(概览 / 详细),启动时会让用户选,默认概览。
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import Any, Optional
 from . import __version__, driver
 from .models import Snapshot
 from .monitor import Monitor
-from .ui import Dashboard, Theme, terminal_size
+from .ui import DEFAULT_MODE, MODE_DETAIL, MODE_OVERVIEW, Dashboard, Theme, terminal_size
 from .util import Style, enable_vt, supports_color
 
 # ANSI 控制序列
@@ -45,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-color", action="store_true", help="禁用颜色")
     parser.add_argument(
         "--no-msr", action="store_true", help="禁用 PawnIO/MSR 读取(不需要装驱动)"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=[MODE_OVERVIEW, MODE_DETAIL],
+        default="",
+        help=(
+            "显示模式:overview=概览(默认),detail=详细。"
+            "不给这个参数时启动会询问"
+        ),
     )
     parser.add_argument(
         "--no-driver-install",
@@ -192,6 +203,82 @@ def prepare_driver(args: argparse.Namespace) -> bool:
     return True
 
 
+# ---------------------------------------------------------------- 显示模式
+
+#: 提示里可以输入的东西 -> 模式名
+_MODE_ALIASES = {
+    "1": MODE_OVERVIEW,
+    "2": MODE_DETAIL,
+    "o": MODE_OVERVIEW,
+    "overview": MODE_OVERVIEW,
+    "d": MODE_DETAIL,
+    "detail": MODE_DETAIL,
+}
+
+
+def parse_mode_choice(text: str) -> Optional[str]:
+    """解析用户输入的模式选择。
+
+    * 空输入(直接回车)-> 默认模式(概览);
+    * "1" / "overview" -> 概览,"2" / "detail" -> 详细;
+    * 认不出来 -> None,调用方应该再问一次。
+    """
+    key = (text or "").strip().lower()
+    if not key:
+        return DEFAULT_MODE
+    return _MODE_ALIASES.get(key)
+
+
+def is_interactive() -> bool:
+    """标准输入和输出是不是都连着终端(能不能跟用户对话)。"""
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def choose_mode() -> str:
+    """让用户选显示模式,返回模式名。"""
+    style = Style(enabled=supports_color())
+    print()
+    print(style.bright_cyan("选择显示模式:"))
+    print(
+        f"  {style.bright_cyan('1')} 概览模式  "
+        f"{style.gray('CPU / 内存 / GPU / 网络 / 磁盘,一屏看完')}"
+    )
+    print(
+        f"  {style.bright_cyan('2')} 详细模式  "
+        f"{style.gray('全部面板:每核温度、硬盘 SMART、网卡、进程榜')}"
+    )
+    while True:
+        try:
+            text = input(style.bright_cyan("请输入编号 [1]: "))
+        except (EOFError, OSError):
+            # 没有可读输入(输入被重定向,或者控制台被关掉了),用默认模式
+            print()
+            return DEFAULT_MODE
+        mode = parse_mode_choice(text)
+        if mode is not None:
+            return mode
+        print(style.yellow("  只能输入 1 或 2(直接回车 = 1 概览模式)。"))
+
+
+def resolve_mode(args: argparse.Namespace) -> str:
+    """决定这次用哪个显示模式。
+
+    优先级:`--mode` > 交互询问 > 默认(概览)。
+    非交互场景(`--json` / `--csv`、输出被重定向、stdin 不是终端)
+    一律用默认模式,免得程序干等着没人回答。
+    """
+    if args.mode:
+        return args.mode
+    if args.json or args.csv:
+        return DEFAULT_MODE
+    if not is_interactive():
+        return DEFAULT_MODE
+    return choose_mode()
+
+
 # ---------------------------------------------------------------- 主循环
 
 
@@ -239,12 +326,12 @@ def restore_output_encoding(old_cp: int) -> None:
             pass
 
 
-def run_tui(monitor: Monitor, args: argparse.Namespace) -> int:
+def run_tui(monitor: Monitor, args: argparse.Namespace, mode: str) -> int:
     color = not args.no_color and supports_color()
     style = Style(enabled=color)
     width = args.width or terminal_size()[0]
     theme = Theme(style=style, width=width)
-    dashboard = Dashboard(theme, top=args.top)
+    dashboard = Dashboard(theme, top=args.top, mode=mode)
 
     out, need_close = _open_out(args)
     try:
@@ -333,8 +420,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         restore_output_encoding(old_cp)
         return 0
 
+    try:
+        mode = resolve_mode(args)
+    except KeyboardInterrupt:
+        # 用户在选择模式的时候按了 Ctrl+C
+        print()
+        restore_output_encoding(old_cp)
+        return 0
+
     monitor = Monitor(enable_msr=not args.no_msr, top=args.top)
-    if args.no_process:
+    # 概览模式不显示进程榜,索性别去采集它(省一次进程遍历)
+    if args.no_process or (
+        mode == MODE_OVERVIEW and not args.json and not args.csv
+    ):
         monitor.process = _NullProcessCollector()
     monitor.warmup()
 
@@ -343,7 +441,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return run_json(monitor, args)
         if args.csv:
             return run_csv(monitor, args)
-        return run_tui(monitor, args)
+        return run_tui(monitor, args, mode)
     finally:
         monitor.close()
         restore_output_encoding(old_cp)

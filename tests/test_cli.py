@@ -9,7 +9,16 @@ import sys
 from contextlib import redirect_stdout
 
 from pcmonitor import driver
-from pcmonitor.cli import build_parser, main, prepare_driver, setup_output_encoding
+from pcmonitor.cli import (
+    build_parser,
+    choose_mode,
+    main,
+    parse_mode_choice,
+    prepare_driver,
+    resolve_mode,
+    setup_output_encoding,
+)
+from pcmonitor.ui import DEFAULT_MODE, MODE_DETAIL, MODE_OVERVIEW
 
 
 def _run(args: list[str]) -> str:
@@ -155,3 +164,88 @@ def test_json_mode_does_not_self_elevate(monkeypatch):
 
     monkeypatch.setattr(driver, "elevate_self", boom)
     assert prepare_driver(_args("--json")) is True
+
+
+# ---------------------------------------------------------------- 显示模式
+
+
+def test_empty_answer_means_overview():
+    """直接回车 = 1 = 概览模式。"""
+    assert parse_mode_choice("") == MODE_OVERVIEW
+    assert parse_mode_choice("   ") == MODE_OVERVIEW
+
+
+def test_number_answers_pick_the_mode():
+    assert parse_mode_choice("1") == MODE_OVERVIEW
+    assert parse_mode_choice("2") == MODE_DETAIL
+    assert parse_mode_choice(" 2 ") == MODE_DETAIL
+
+
+def test_word_answers_pick_the_mode():
+    assert parse_mode_choice("overview") == MODE_OVERVIEW
+    assert parse_mode_choice("detail") == MODE_DETAIL
+    assert parse_mode_choice("OVERVIEW") == MODE_OVERVIEW
+
+
+def test_garbage_answer_is_rejected():
+    assert parse_mode_choice("x") is None
+    assert parse_mode_choice("3") is None
+
+
+def test_choose_mode_asks_again_on_garbage(monkeypatch):
+    answers = iter(["x", "2"])
+    monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+    assert choose_mode() == MODE_DETAIL
+
+
+def test_choose_mode_defaults_to_overview(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda *a: "")
+    assert choose_mode() == MODE_OVERVIEW
+
+
+def test_choose_mode_survives_a_closed_stdin(monkeypatch):
+    """输入被重定向(EOF)时不能死等,直接用默认模式。"""
+
+    def eof(*a):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", eof)
+    assert choose_mode() == DEFAULT_MODE
+
+
+def test_explicit_mode_flag_skips_the_question(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("给了 --mode 就不该再问")
+
+    monkeypatch.setattr("builtins.input", boom)
+    assert resolve_mode(_args("--mode", "detail")) == MODE_DETAIL
+    assert resolve_mode(_args("--mode", "overview")) == MODE_OVERVIEW
+
+
+def test_non_interactive_run_uses_the_default(monkeypatch):
+    """管道里跑、或者 stdin 不是终端时,不该弹提示。"""
+    monkeypatch.setattr("pcmonitor.cli.is_interactive", lambda: False)
+    assert resolve_mode(_args()) == DEFAULT_MODE
+
+
+def test_json_mode_never_asks(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("--json 不该问模式")
+
+    monkeypatch.setattr("builtins.input", boom)
+    monkeypatch.setattr("pcmonitor.cli.is_interactive", lambda: True)
+    assert resolve_mode(_args("--json")) == DEFAULT_MODE
+    assert resolve_mode(_args("--csv")) == DEFAULT_MODE
+
+
+def test_overview_mode_output_has_no_process_panel():
+    out = _run(["--once", "--no-msr", "--no-process", "--mode", "overview", "--width", "100"])
+    assert "磁盘" in out
+    assert "进程" not in out
+
+
+def test_detail_mode_output_has_the_process_panel():
+    out = _run(["--once", "--no-msr", "--no-process", "--mode", "detail", "--width", "100"])
+    # "物理网卡" 和 "进程" 只出现在详细模式里
+    assert "进程" in out
+    assert "物理网卡" in out

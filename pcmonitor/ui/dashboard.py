@@ -28,14 +28,31 @@ from .theme import Theme
 # 概览里的迷你曲线保留多少个采样点
 _HISTORY = 120
 _SPARK_WIDTH = 16
+# 磁盘摘要的曲线更短,给"读/写/温度"这些文字留地方
+_DISK_SPARK_WIDTH = 8
+
+#: 显示模式
+MODE_OVERVIEW = "overview"
+MODE_DETAIL = "detail"
+#: 不问用户时的默认模式
+DEFAULT_MODE = MODE_OVERVIEW
 
 
 class Dashboard:
-    """有状态的渲染器:保存历史值用于画迷你曲线。"""
+    """有状态的渲染器:保存历史值用于画迷你曲线。
 
-    def __init__(self, theme: Theme, top: int = 10) -> None:
+    两种模式:
+    * `MODE_OVERVIEW` —— 概览模式,只画概览面板(CPU/内存/GPU/网络/磁盘摘要)
+      和提示行,一屏看完;
+    * `MODE_DETAIL` —— 详细模式,画全部面板(每核温度、硬盘 SMART、网卡、进程榜)。
+    """
+
+    def __init__(
+        self, theme: Theme, top: int = 10, mode: str = MODE_DETAIL
+    ) -> None:
         self.theme = theme
         self.top = top
+        self.mode = mode
         self._history: dict[str, deque] = {
             key: deque(maxlen=_HISTORY)
             for key in ("cpu", "mem", "gpu", "net_rx", "net_tx", "cpu_temp")
@@ -47,13 +64,14 @@ class Dashboard:
         self._record(snap)
         lines: list[str] = []
         lines.extend(self._header(snap))
-        lines.extend(self._overview(snap))
-        lines.extend(self._cpu_panel(snap))
-        lines.extend(self._gpu_panel(snap))
-        lines.extend(self._memory_panel(snap))
-        lines.extend(self._disk_panel(snap))
-        lines.extend(self._network_panel(snap))
-        lines.extend(self._process_panel(snap))
+        lines.extend(self._overview(snap, include_disk=self.mode == MODE_OVERVIEW))
+        if self.mode != MODE_OVERVIEW:
+            lines.extend(self._cpu_panel(snap))
+            lines.extend(self._gpu_panel(snap))
+            lines.extend(self._memory_panel(snap))
+            lines.extend(self._disk_panel(snap))
+            lines.extend(self._network_panel(snap))
+            lines.extend(self._process_panel(snap))
         lines.extend(self._footer(snap, warnings or []))
         return lines
 
@@ -70,27 +88,51 @@ class Dashboard:
         self._history["net_tx"].append(snap.network.physical_tx_bytes_per_sec)
         if snap.cpu.package_temp_c is not None:
             self._history["cpu_temp"].append(snap.cpu.package_temp_c)
+        # 磁盘的曲线按盘分开存,概览里每块盘各画各的
+        for key, _model, _temp, _health, io in self._disk_entries(snap):
+            read_key = f"disk_read:{key}"
+            write_key = f"disk_write:{key}"
+            if read_key not in self._history:
+                self._history[read_key] = deque(maxlen=_HISTORY)
+            if write_key not in self._history:
+                self._history[write_key] = deque(maxlen=_HISTORY)
+            self._history[read_key].append(io.read_bytes_per_sec if io else 0.0)
+            self._history[write_key].append(io.write_bytes_per_sec if io else 0.0)
 
-    def _spark(self, key: str) -> str:
-        return sparkline(list(self._history[key]), width=_SPARK_WIDTH)
+    def _spark(self, key: str, width: int = _SPARK_WIDTH) -> str:
+        return sparkline(list(self._history.get(key, ())), width=width)
 
     # ------------------------------------------------------------ 各区块
 
     def _header(self, snap: Snapshot) -> list[str]:
         t = self.theme
         host = snap.host
-        parts = [
-            t.title_bar("PC Monitor"),
-            t.paint(t.muted, host.hostname),
-            t.paint(t.muted, host.os_name),
+        sep = "  ·  "
+        mode_label = "概览模式" if self.mode == MODE_OVERVIEW else "详细模式"
+
+        # 头部按重要性排序,窄终端下装不下的先砍掉(最后砍系统版本),
+        # 保证整行永远不超过终端宽度 —— 头部不是面板,不会被自动裁剪。
+        parts = [t.title_bar("PC Monitor")]
+        optional = [
+            t.paint(t.accent, mode_label),
             t.paint(t.accent, fmt_human_time(snap.timestamp)),
+            t.paint(t.muted, host.hostname),
         ]
         if host.uptime_seconds:
-            parts.append(t.paint(t.muted, f"运行 {fmt_duration(host.uptime_seconds)}"))
-        line = t.paint(t.muted, "  ·  ").join(parts)
+            optional.append(
+                t.paint(t.muted, f"运行 {fmt_duration(host.uptime_seconds)}")
+            )
+        optional.append(t.paint(t.muted, host.os_name))
+
+        for part in optional:
+            if dwidth(sep.join(parts + [part])) > t.width:
+                break
+            parts.append(part)
+
+        line = t.paint(t.muted, sep).join(parts)
         return [line, t.paint(t.muted, "─" * t.width)]
 
-    def _overview(self, snap: Snapshot) -> list[str]:
+    def _overview(self, snap: Snapshot, include_disk: bool = False) -> list[str]:
         t = self.theme
         bar_width = 18
         body: list[str] = []
@@ -169,7 +211,74 @@ class Dashboard:
             + t.paint(t.muted, self._spark("net_tx"))
             + t.paint(t.muted, f"   活动网卡 {active} 张")
         )
+
+        # ---- 磁盘(概览模式下才画,详细模式有单独的磁盘面板)
+        if include_disk:
+            body.extend(self._disk_summary(snap))
         return self._panel("概览", body)
+
+    # ------------------------------------------------------------ 磁盘摘要
+
+    def _disk_entries(
+        self, snap: Snapshot
+    ) -> list[tuple[str, str, Optional[float], Optional[str], object]]:
+        """物理盘 + 对应的读写速率。
+
+        拿不到 SMART(没装驱动 / 老机器不支持)时,退而求其次:
+        只按 IO 设备列出速率,温度显示"-"。
+        """
+        io_map = {io.name: io for io in snap.disk_io}
+        entries: list[tuple[str, str, Optional[float], Optional[str], object]] = []
+        for disk in snap.physical_disks:
+            io = self._match_io(io_map, disk)
+            model = disk.model or disk.bus_type or "磁盘"
+            entries.append(
+                (str(disk.device_id), model, disk.temp_c, disk.health, io)
+            )
+        if not entries:
+            for io in snap.disk_io[:2]:
+                entries.append((io.name, io.name, None, None, io))
+        return entries
+
+    def _disk_summary(self, snap: Snapshot) -> list[str]:
+        """概览模式下的硬盘摘要:每块盘一行,读/写速率 + 温度。
+
+        列宽是照着概览里其它行(标签 + 进度条 + 百分比 + 曲线)算的:
+        速率占 25 列,曲线正好从第 33 列开始,跟 CPU/内存/GPU 的曲线对齐。
+        """
+        t = self.theme
+        entries = self._disk_entries(snap)
+        if not entries:
+            return [t.paint(t.muted, "未检测到磁盘")]
+
+        lines: list[str] = []
+        for index, (key, model, temp, health, io) in enumerate(entries):
+            read_rate = io.read_bytes_per_sec if io is not None else 0.0
+            write_rate = io.write_bytes_per_sec if io is not None else 0.0
+
+            cells = [
+                # 第一行写"磁盘",后面的留空,几块盘的内容才能对齐
+                t.paint(t.label, pad("磁盘" if index == 0 else "", 6)),
+                # 速率右对齐到固定宽度,不然曲线会跟着数字长度乱跑
+                t.paint(t.down, f"读 {fmt_rate(read_rate):>9}")
+                + " "
+                + t.paint(t.up, f"写 {fmt_rate(write_rate):>9}"),
+                t.paint(
+                    t.muted,
+                    self._spark(f"disk_read:{key}", _DISK_SPARK_WIDTH)
+                    + self._spark(f"disk_write:{key}", _DISK_SPARK_WIDTH),
+                ),
+            ]
+            if temp is not None:
+                cells.append(t.paint(temp_color_name(temp), f"{temp:.0f}°C"))
+            else:
+                cells.append(t.paint(t.muted, "温度 -"))
+            if health:
+                healthy = health.lower() in ("healthy", "正常", "ok")
+                cells.append(t.paint(t.good if healthy else t.critical, health))
+            cells.append(t.paint(t.muted, model[:16]))
+            lines.append(" ".join(c for c in cells if c))
+        return lines
 
     def _meter(
         self,

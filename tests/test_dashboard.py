@@ -24,7 +24,7 @@ from pcmonitor.models import (
     Snapshot,
     ThermalSnapshot,
 )
-from pcmonitor.ui import Dashboard, Theme
+from pcmonitor.ui import MODE_DETAIL, MODE_OVERVIEW, Dashboard, Theme
 from pcmonitor.util import Style, dwidth
 
 
@@ -178,6 +178,66 @@ def test_render_handles_empty_snapshot():
     """所有字段都拿不到时也不能崩。"""
     theme = Theme(style=Style(enabled=True), width=80)
     dash = Dashboard(theme)
+    lines = dash.render(Snapshot())
+    assert lines
+    for line in lines:
+        assert dwidth(line) <= 80
+
+
+# ---------------------------------------------------------------- 显示模式
+
+
+@pytest.mark.parametrize("width", [80, 100, 160])
+@pytest.mark.parametrize("color", [False, True])
+def test_overview_mode_lines_fit_width(width: int, color: bool):
+    theme = Theme(style=Style(enabled=color), width=width)
+    dash = Dashboard(theme, top=5, mode=MODE_OVERVIEW)
+    lines = dash.render(_snapshot(), ["一条警告"])
+    for line in lines:
+        assert dwidth(line) <= width, repr(line)
+
+
+def test_overview_mode_shows_disk_io_and_temp():
+    """概览模式要能看到硬盘的读写速率和温度。"""
+    theme = Theme(style=Style(enabled=False), width=120)
+    dash = Dashboard(theme, top=5, mode=MODE_OVERVIEW)
+    text = "\n".join(dash.render(_snapshot()))
+    assert "磁盘" in text
+    assert "读" in text and "写" in text  # 读写速率
+    assert "43°C" in text  # SMART 温度
+    assert "ST4000NM0035" in text  # 型号
+
+
+def test_overview_mode_omits_the_detailed_panels():
+    """概览模式只画概览和提示,详细面板(进程榜等)不画。"""
+    theme = Theme(style=Style(enabled=False), width=120)
+    dash = Dashboard(theme, top=5, mode=MODE_OVERVIEW)
+    text = "\n".join(dash.render(_snapshot()))
+    assert "进程" not in text
+    assert "每核" not in text
+    # 概览的四个核心指标还在
+    assert "CPU" in text and "内存" in text and "GPU" in text and "网络" in text
+
+
+def test_detail_mode_keeps_everything():
+    theme = Theme(style=Style(enabled=False), width=120)
+    dash = Dashboard(theme, top=5, mode=MODE_DETAIL)
+    text = "\n".join(dash.render(_snapshot()))
+    for panel in ("概览", "CPU", "GPU", "内存", "磁盘", "网络", "进程", "提示"):
+        assert panel in text, panel
+
+
+def test_overview_mode_marks_itself_in_the_header():
+    theme = Theme(style=Style(enabled=False), width=120)
+    overview = Dashboard(theme, mode=MODE_OVERVIEW)
+    detail = Dashboard(theme, mode=MODE_DETAIL)
+    assert "概览模式" in overview.render(_snapshot())[0]
+    assert "详细模式" in detail.render(_snapshot())[0]
+
+
+def test_overview_mode_survives_an_empty_snapshot():
+    theme = Theme(style=Style(enabled=False), width=80)
+    dash = Dashboard(theme, mode=MODE_OVERVIEW)
     lines = dash.render(Snapshot())
     assert lines
     for line in lines:
