@@ -36,7 +36,33 @@ jobs:
 
       # 打包前先跑测试,不让坏版本流出去。
       - name: 跑测试
-        run: python -m pytest tests -q
+        id: run_tests
+        shell: pwsh
+        run: |
+          python -m pytest tests -q --tb=short 2>&1 | Tee-Object -FilePath pytest.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { exit $code }
+
+      # Actions 的日志要登录才能看。这里把失败的输出贴到 commit 上,
+      # 谁都能直接看 —— 排查 CI 失败时省掉"要个 token"的来回。
+      - name: 把失败日志贴到 commit 上
+        if: ${{ failure() && steps.run_tests.outcome == 'failure' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $log = Get-Content pytest.log -Raw
+          if (-not $log) { $log = "(没拿到日志)" }
+          $body = @'
+          **pytest 失败**
+
+          ```
+          __LOG__
+          ```
+          '@
+          $body = $body.Replace('__LOG__', $log)
+          @{ body = $body } | ConvertTo-Json -Compress | Set-Content -Encoding utf8NoBOM -NoNewline comment.json
+          gh api --method POST "repos/$env:GITHUB_REPOSITORY/commits/$env:GITHUB_SHA/comments" --input comment.json
 
       # 用和本地完全一样的脚本打包,顺便验证 vendor 下的 PawnIO 文件齐全。
       - name: 打包单文件 exe
