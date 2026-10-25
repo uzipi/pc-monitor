@@ -1,0 +1,67 @@
+name: Release
+
+# 推 tag 才发布。也可以在 Actions 页面手动触发,指定要发布的 tag。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag,例如 v0.1"
+        required: true
+
+# 只有 contents 权限,足够创建 Release 和上传附件。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 打包并发布
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # 打包前先跑测试,不让坏版本流出去。
+      - name: 跑测试
+        run: python -m pytest tests -q
+
+      # 用和本地完全一样的脚本打包,顺便验证 vendor 下的 PawnIO 文件齐全。
+      - name: 打包单文件 exe
+        shell: cmd
+        run: cmd /c scripts\build.bat
+
+      - name: 计算 SHA-256
+        shell: pwsh
+        run: |
+          $exe = "dist\pc-monitor.exe"
+          if (-not (Test-Path $exe)) { throw "打包产物不存在:$exe" }
+          $item = Get-Item $exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  pc-monitor.exe" | Out-File -Encoding ascii "dist\pc-monitor.exe.sha256"
+          "size   = $($item.Length) bytes"
+          "sha256 = $hash"
+
+      # gh 是 GitHub runner 自带的,不用装也不用第三方 action。
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$env:TAG" `
+            "dist\pc-monitor.exe" `
+            "dist\pc-monitor.exe.sha256" `
+            --title "$env:TAG" `
+            --notes-file "docs\RELEASE-NOTES.md"
