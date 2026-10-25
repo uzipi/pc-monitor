@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pc-monitor"
+version = "1.0.0"
+description = "Windows 硬件监控终端仪表盘(CPU/内存/GPU/温度/网速/磁盘/进程)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-2.0-or-later"
+license-files = ["LICENSE", "vendor/pawnio/LICENSE.PawnIO-GPL-2.0.txt", "vendor/pawnio/modules/LICENSE.PawnIO.Modules-LGPL-2.1.txt"]
+authors = [{ name = "pc-monitor contributors" }]
+keywords = ["monitoring", "hardware", "cpu", "temperature", "tui", "windows"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "License :: OSI Approved :: GNU General Public License v2 or later (GPLv2+)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+]
+dependencies = ["psutil>=5.9"]
+
+[project.optional-dependencies]
+dev = ["pyinstaller>=6.0", "pytest>=7.0", "pyflakes>=3.0"]
+
+[project.scripts]
+pc-monitor = "pcmonitor.cli:main"
+
+[tool.setuptools]
+packages = ["pcmonitor", "pcmonitor.collectors", "pcmonitor.ui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
