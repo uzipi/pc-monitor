@@ -8,14 +8,17 @@
    底层走 SMART,不需要管理员权限也不需要额外驱动。
 4. **ACPI 热区**:兜底。实测在多数主板上这个值不随负载变化,只能当参考,
    所以只标注为"近似",并且不做高频采样。
+
+3 和 4 都要拉起一个 PowerShell 进程,实测一次要 1 秒多。放在采集路径里
+会让界面每隔几秒就卡一下,所以统一交给后台线程刷新,前台只读缓存。
 """
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from ..models import PhysicalDisk, ThermalSnapshot
+from .base import BackgroundRefresher
 from .powershell import as_list, run_powershell_json
 
 # 取物理磁盘的 SMART 信息(温度、健康度、通电时长、磨损)
@@ -55,25 +58,24 @@ $out | ConvertTo-Json -Compress
 
 
 class SmartDiskSource:
-    """通过 Windows 的存储可靠性计数器读取硬盘 SMART 信息。"""
+    """通过 Windows 的存储可靠性计数器读取硬盘 SMART 信息。
 
-    def __init__(self) -> None:
+    PowerShell 查询约 1 秒,由后台线程每 10 秒刷新一次;
+    `sample()` 只是读缓存,不会阻塞界面。
+    """
+
+    def __init__(self, interval: float = 10.0) -> None:
         self.available = True
-        self.error: Optional[str] = None
-        self._last: list[PhysicalDisk] = []
-        self._last_refresh = 0.0
-        self._min_interval = 10.0  # SMART 查询较慢,10 秒刷新一次足够
+        self._refresher = BackgroundRefresher(
+            self._query, interval=interval, name="smart-disk"
+        )
 
-    def sample(self, force: bool = False) -> list[PhysicalDisk]:
-        now = time.monotonic()
-        if not force and (now - self._last_refresh) < self._min_interval:
-            return self._last
-        self._last_refresh = now
+    # ---------------------------------------------------------- 后台刷新
 
+    def _query(self) -> list[PhysicalDisk]:
         data = run_powershell_json(_PHYSICAL_DISK_SCRIPT, timeout=25)
         if data is None:
-            self.error = "读取磁盘 SMART 信息失败"
-            return self._last
+            raise RuntimeError("读取磁盘 SMART 信息失败")
 
         disks: list[PhysicalDisk] = []
         for item in as_list(data):
@@ -93,28 +95,42 @@ class SmartDiskSource:
             wear = item.get("Wear")
             disk.wear_percent = float(wear) if isinstance(wear, (int, float)) else None
             disks.append(disk)
-
-        self._last = disks
-        self.error = None
         return disks
+
+    # ---------------------------------------------------------- 对外接口
+
+    def start(self) -> None:
+        self._refresher.start()
+
+    def stop(self) -> None:
+        self._refresher.stop()
+
+    def wait_ready(self, timeout: float = 3.0) -> bool:
+        return self._refresher.wait_ready(timeout)
+
+    @property
+    def error(self) -> Optional[str]:
+        return self._refresher.get()[1]
+
+    def sample(self, force: bool = False) -> list[PhysicalDisk]:
+        if force:
+            self._refresher.refresh_now()
+        disks, _ = self._refresher.get()
+        return disks or []
 
 
 class AcpiThermalSource:
-    """ACPI 热区温度,仅作为兜底参考。"""
+    """ACPI 热区温度,仅作为兜底参考。同样放到后台刷新。"""
 
-    def __init__(self) -> None:
-        self._last: list[tuple[str, float]] = []
-        self._last_refresh = 0.0
+    def __init__(self, interval: float = 30.0) -> None:
+        self._refresher = BackgroundRefresher(
+            self._query, interval=interval, name="acpi-thermal"
+        )
 
-    def sample(self, force: bool = False) -> list[tuple[str, float]]:
-        now = time.monotonic()
-        if not force and (now - self._last_refresh) < 30.0:
-            return self._last
-        self._last_refresh = now
-
+    def _query(self) -> list[tuple[str, float]]:
         data = run_powershell_json(_ACPI_SCRIPT, timeout=15)
         if data is None:
-            return self._last
+            return []
         zones: list[tuple[str, float]] = []
         for item in as_list(data):
             if not isinstance(item, dict):
@@ -123,8 +139,22 @@ class AcpiThermalSource:
             temp = item.get("TempC")
             if name and isinstance(temp, (int, float)):
                 zones.append((name, float(temp)))
-        self._last = zones
         return zones
+
+    def start(self) -> None:
+        self._refresher.start()
+
+    def stop(self) -> None:
+        self._refresher.stop()
+
+    def wait_ready(self, timeout: float = 3.0) -> bool:
+        return self._refresher.wait_ready(timeout)
+
+    def sample(self, force: bool = False) -> list[tuple[str, float]]:
+        if force:
+            self._refresher.refresh_now()
+        zones, _ = self._refresher.get()
+        return zones or []
 
 
 class ThermalCollector:
@@ -133,6 +163,17 @@ class ThermalCollector:
     def __init__(self, enable_acpi: bool = True) -> None:
         self.smart = SmartDiskSource()
         self.acpi = AcpiThermalSource() if enable_acpi else None
+
+    def start(self) -> None:
+        """启动后台刷新线程。"""
+        self.smart.start()
+        if self.acpi:
+            self.acpi.start()
+
+    def stop(self) -> None:
+        self.smart.stop()
+        if self.acpi:
+            self.acpi.stop()
 
     def sample(
         self,

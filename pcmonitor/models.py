@@ -117,6 +117,9 @@ class NetworkIface:
     tx_bytes_total: int = 0
     rx_packets_per_sec: float = 0.0
     tx_packets_per_sec: float = 0.0
+    # 是否是真实网卡。虚拟网卡(WSL/Hyper-V/VPN)常是物理网卡的桥接,
+    # 全量汇总会把同一份流量算两遍。
+    is_physical: bool = False
 
 
 @dataclass
@@ -180,8 +183,6 @@ class ProcessStat:
     cpu_percent: float = 0.0
     memory_bytes: int = 0
     memory_percent: float = 0.0
-    threads: int = 0
-    status: str = ""
 
 
 @dataclass

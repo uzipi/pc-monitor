@@ -66,6 +66,7 @@ class NetworkCollector:
 
         for name, c in counters.items():
             iface = NetworkIface(name=name)
+            iface.is_physical = _is_physical(name)
             iface.rx_bytes_per_sec = self._delta.rate(
                 f"{name}:rx", float(c.bytes_recv)
             )
@@ -84,7 +85,7 @@ class NetworkCollector:
 
             snap.rx_bytes_per_sec += iface.rx_bytes_per_sec
             snap.tx_bytes_per_sec += iface.tx_bytes_per_sec
-            if _is_physical(name):
+            if iface.is_physical:
                 snap.physical_rx_bytes_per_sec += iface.rx_bytes_per_sec
                 snap.physical_tx_bytes_per_sec += iface.tx_bytes_per_sec
 

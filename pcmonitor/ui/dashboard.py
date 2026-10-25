@@ -256,6 +256,14 @@ class Dashboard:
         temps.append(t.paint(t.muted, f"来源 {source}"))
         body.extend(self._wrap_cells(temps))
 
+        # ACPI 热区只是兜底参考:主板上这个值基本不随负载变化,
+        # 所以单独一行标"近似",不跟真实 MSR 温度混在一起。
+        for zone_name, zone_temp in snap.thermal.acpi_zones:
+            body.append(
+                t.paint(t.muted, f"ACPI 热区 {_short_zone(zone_name)}(近似) ")
+                + t.paint(temp_color_name(zone_temp), f"{zone_temp:.1f}°C")
+            )
+
         # 每核网格:编号 + 使用率 + 温度
         cores = cpu.per_core_percent
         temps_list = cpu.core_temps_c
@@ -457,10 +465,17 @@ class Dashboard:
         )
 
         for iface in net.interfaces:
-            if iface.rx_bytes_per_sec <= 0 and iface.tx_bytes_per_sec <= 0:
+            # 物理网卡一律列出(哪怕当前没流量),虚拟网卡只在有流量时出现,
+            # 否则一屏几十行都是蓝牙/WSL 之类的虚拟适配器。
+            if not iface.is_physical and (
+                iface.rx_bytes_per_sec <= 0 and iface.tx_bytes_per_sec <= 0
+            ):
                 continue
+            tag = t.paint(t.accent, pad(iface.name, 22))
+            if not iface.is_physical:
+                tag += t.paint(t.muted, "(虚拟)")
             body.append(
-                t.paint(t.accent, pad(iface.name, 22))
+                tag
                 + t.paint(t.down, f"↓ {fmt_rate(iface.rx_bytes_per_sec):>12}")
                 + t.paint(t.up, f"  ↑ {fmt_rate(iface.tx_bytes_per_sec):>12}")
             )
@@ -534,6 +549,11 @@ class Dashboard:
 
 def fmt_temp_short(temp: Optional[float]) -> str:
     return f"{temp:.0f}°C" if temp is not None else "-"
+
+
+def _short_zone(name: str) -> str:
+    """ACPI 热区名字形如 ACPI\\ThermalZone\\TZ00_0,只留最后一段。"""
+    return name.rsplit("\\", 1)[-1] or name
 
 
 def temp_color_name(temp: float) -> str:

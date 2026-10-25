@@ -37,6 +37,19 @@ class Monitor:
         self.thermal = ThermalCollector()
         self.process = ProcessCollector()
         self.started_at = time.time()
+        self._started = False
+
+    def start(self) -> None:
+        """启动后台刷新线程(硬盘 SMART / SMBIOS 内存条 / ACPI 热区)。
+
+        这些查询都要拉起 PowerShell 进程,单次 1 秒以上,
+        放到后台线程里,界面就不会因为它们卡顿。
+        """
+        if self._started:
+            return
+        self._started = True
+        self.memory.start()
+        self.thermal.start()
 
     def warmup(self) -> None:
         """先采一帧当基线。
@@ -44,10 +57,14 @@ class Monitor:
         psutil 的 CPU 占用、网速/磁盘速率、RAPL 功率都是"两次采样求差",
         没有基线的话第一帧全是 0 或 None。
         """
+        self.start()
         try:
             self.sample()
         except Exception:
             pass
+        # 等后台第一轮 SMART / SMBIOS 查询结束,免得开头几秒是空的
+        self.memory.wait_ready(2.0)
+        self.thermal.smart.wait_ready(3.0)
 
     # ------------------------------------------------------------ 采样
 
@@ -114,3 +131,5 @@ class Monitor:
 
     def close(self) -> None:
         self.cpu.close()
+        self.memory.stop()
+        self.thermal.stop()

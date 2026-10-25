@@ -19,6 +19,8 @@ CPU / 内存 / GPU 的占用与温度、磁盘 SMART、网速、进程榜,一屏
   不是 ACPI 热区那种"永远不变"的假值。
 - **不依赖 .NET**:绕过 LibreHardwareMonitor 的 C# 库,直接用 ctypes 调
   PawnIO 官方 C API,纯 Python 实现,打包体积小、启动快。
+- **不卡界面**:SMART、SMBIOS 这类要拉起 PowerShell 的查询(单次 1 秒多)
+  全部放到后台线程,采样线程只读缓存,刷新节奏稳定在 ~80ms 一帧。
 - **降级诚实**:拿不到的指标显示"不可用",绝不编造数字;每个传感器都标注来源。
 - **零重型依赖**:运行时只依赖 `psutil`,其余全是标准库。
 
@@ -111,7 +113,8 @@ pc-monitor --csv --once > 快照.csv
   **目前显示为"不可用",而不是填一个假数字。**
 - **主板温度、CPU/机箱风扇转速**:需要 SuperIO 芯片(NCT67xx 等)的
   SIO 通道,当前未实现。
-- **ACPI 热区温度**不随负载变化,只作兜底参考,界面上标注为"近似"。
+- **ACPI 热区温度**不随负载变化,只作兜底参考。界面上单列一行标注为"近似",
+  不会跟真实的 MSR 温度混在一起显示。
 - GPU 指标依赖 `nvidia-smi`,AMD/Intel 核显暂不支持。
 
 ## 技术要点
@@ -143,6 +146,21 @@ Windows SDK 头文件里的 `PERFORMANCE_INFORMATION` 只有 88 字节,
 `cb` 传 88 会直接 `ERROR_BAD_LENGTH` 失败。而且内存类字段的单位是
 **页**而不是字节,要用 `PageSize` 换算。
 
+### 慢查询为什么不能放在采集路径里
+
+硬盘 SMART(`Get-StorageReliabilityCounter`)和内存条信息
+(`Get-CimInstance Win32_PhysicalMemory`)都要拉起一个 PowerShell 进程,
+实测单次 1.0~1.4 秒。早期版本直接在采样线程里同步调用,
+结果就是界面每 10 秒就整体卡住一秒多,动画直接顿住。
+
+现在这两个查询都交给 `collectors/base.py` 里的 `BackgroundRefresher`:
+守护线程定期刷新并写入缓存,采样线程只做一次加锁读。
+实测一帧从 1350ms 降到 80ms,而且再也不会出现尖峰。
+
+进程采集也踩过同样的坑:`process_iter(["status"])` 和逐个进程的
+`num_threads()` 各要 200ms+,改用一次 `GetPerformanceInfo` 拿总量后,
+进程榜从 511ms 降到 18ms。
+
 ## 目录结构
 
 ```
@@ -153,7 +171,7 @@ pcmonitor/
   resources.py        打包后/源码运行时的资源路径
   util.py             宽度计算、颜色、格式化
   collectors/
-    base.py           增量计数器
+    base.py           增量计数器 + 后台刷新器
     cpu.py            CPU + MSR 读取与解码
     memory.py         内存、提交量、内存条信息
     gpu.py            nvidia-smi 解析

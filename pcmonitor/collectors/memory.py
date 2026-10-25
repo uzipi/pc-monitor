@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import ctypes
-import time
 from typing import Optional
 
 import psutil
 
 from ..models import DimmInfo, MemorySnapshot
+from .base import BackgroundRefresher
 from .powershell import as_list, run_powershell_json
 
 # SMBIOS 内存类型枚举
@@ -110,7 +110,7 @@ class _PerformanceInformation(ctypes.Structure):
     ]
 
 
-def _get_performance_info() -> Optional[_PerformanceInformation]:
+def get_performance_info() -> Optional[_PerformanceInformation]:
     """调用 K32GetPerformanceInfo,拿不到就返回 None。
 
     用 kernel32 的 K32 前缀版本而不是 psapi.dll 的转发层,行为一致。
@@ -129,6 +129,10 @@ def _get_performance_info() -> Optional[_PerformanceInformation]:
         return None
 
 
+# 兼容旧名字
+_get_performance_info = get_performance_info
+
+
 def _get_commit_info() -> tuple[Optional[int], Optional[int]]:
     """取提交量与提交上限(字节)。
 
@@ -144,8 +148,19 @@ def _get_commit_info() -> tuple[Optional[int], Optional[int]]:
 
 class MemoryCollector:
     def __init__(self) -> None:
-        self._dimms: list[DimmInfo] = []
-        self._dimms_refreshed = 0.0
+        # SMBIOS 查询要拉起 PowerShell,约 1 秒,放后台线程刷新
+        self._dimm_refresher = BackgroundRefresher(
+            self._query_dimms, interval=60.0, name="dimm-info"
+        )
+
+    def start(self) -> None:
+        self._dimm_refresher.start()
+
+    def stop(self) -> None:
+        self._dimm_refresher.stop()
+
+    def wait_ready(self, timeout: float = 3.0) -> bool:
+        return self._dimm_refresher.wait_ready(timeout)
 
     def sample(self) -> MemorySnapshot:
         snap = MemorySnapshot()
@@ -172,16 +187,10 @@ class MemoryCollector:
         snap.dimms = self.sample_dimms()
         return snap
 
-    def sample_dimms(self, force: bool = False) -> list[DimmInfo]:
-        """内存条信息。SMBIOS 查询较慢,60 秒刷新一次。"""
-        now = time.monotonic()
-        if not force and (now - self._dimms_refreshed) < 60.0:
-            return self._dimms
-        self._dimms_refreshed = now
-
+    def _query_dimms(self) -> list[DimmInfo]:
         data = run_powershell_json(_DIMM_SCRIPT, timeout=20)
         if data is None:
-            return self._dimms
+            raise RuntimeError("读取内存条信息失败")
 
         dimms: list[DimmInfo] = []
         for item in as_list(data):
@@ -215,6 +224,14 @@ class MemoryCollector:
             if isinstance(voltage, (int, float)) and voltage > 0:
                 dimm.voltage_v = float(voltage) / 1000.0
             dimms.append(dimm)
-
-        self._dimms = dimms
         return dimms
+
+    def sample_dimms(self, force: bool = False) -> list[DimmInfo]:
+        """内存条信息(频率/型号等),来自 SMBIOS。
+
+        查询较慢,交给后台线程每 60 秒刷新一次,这里只读缓存。
+        """
+        if force:
+            self._dimm_refresher.refresh_now()
+        dimms, _ = self._dimm_refresher.get()
+        return dimms or []

@@ -1,39 +1,43 @@
 @echo off
-chcp 65001 >nul
+rem ---------------------------------------------------------------------
+rem  Set up the dev environment: create a venv, install deps, run tests.
+rem
+rem  NOTE: keep this file pure ASCII. cmd.exe reads .bat files with the
+rem  console ANSI codepage; UTF-8 Chinese comments desync the parser and
+rem  silently corrupt later lines. Chinese docs live in README.md.
+rem ---------------------------------------------------------------------
 setlocal
-
-rem 初始化开发环境:建虚拟环境、装依赖、跑一遍测试
 
 cd /d "%~dp0.."
 
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [错误] 找不到 python,请先安装 Python 3.10+ 并加入 PATH
+    echo [ERROR] python not found. Install Python 3.10+ and add it to PATH.
     exit /b 1
 )
 
 if not exist ".venv" (
-    echo [1/3] 创建虚拟环境 .venv
+    echo [1/3] Creating virtual environment .venv
     python -m venv .venv
     if errorlevel 1 exit /b 1
 ) else (
-    echo [1/3] 复用已有虚拟环境 .venv
+    echo [1/3] Reusing existing virtual environment .venv
 )
 
 call .venv\Scripts\activate.bat
 
-echo [2/3] 安装依赖
+echo [2/3] Installing dependencies
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
 if errorlevel 1 exit /b 1
 
-echo [3/3] 跑测试
+echo [3/3] Running tests
 python -m pytest tests -q
 if errorlevel 1 (
-    echo [警告] 有测试没通过
+    echo [WARN] Some tests failed.
     exit /b 1
 )
 
 echo.
-echo 完成。运行:  .venv\Scripts\python -m pcmonitor
+echo Done. Run:  .venv\Scripts\python -m pcmonitor
 endlocal
