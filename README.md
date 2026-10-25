@@ -13,6 +13,18 @@ CPU / 内存 / GPU 的占用与温度、磁盘 SMART、网速、进程榜,一屏
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## 下载
+
+**v0.1**(2026-10-25)—— [Releases 页面](https://github.com/uzipi/pc-monitor/releases/tag/v0.1)
+
+| 文件 | 说明 |
+| --- | --- |
+| [`pc-monitor.exe`](https://github.com/uzipi/pc-monitor/releases/download/v0.1/pc-monitor.exe) | 单文件程序,约 11 MB,双击就能跑 |
+| [`pc-monitor.exe.sha256`](https://github.com/uzipi/pc-monitor/releases/download/v0.1/pc-monitor.exe.sha256) | 校验和,确认下载没损坏 |
+
+目标机器**不需要装 Python,也不需要装 .NET**。第一次运行会弹一次 UAC
+(装 PawnIO 驱动,用来看真实的 CPU 温度),点"是"就行。
+
 ## 特点
 
 - **CPU 温度是真的**:直接读 Intel MSR(封装温度、每核温度、电压、RAPL 功耗),
@@ -123,7 +135,8 @@ pc-monitor --mode detail     # 详细
 
 ### 1. 运行
 
-直接下载 `dist/pc-monitor.exe` 双击,或在命令行里跑:
+从 [Releases](https://github.com/uzipi/pc-monitor/releases/tag/v0.1) 下载
+`pc-monitor.exe`,双击,或者在命令行里跑:
 
 ```
 pc-monitor.exe
@@ -324,6 +337,7 @@ vendor/pawnio/        第三方二进制(见该目录下的 README)
 tests/                pytest 用例
 docs/                 开发记录与技术总结
 tools/ghfetch.py      GitHub 抓取小工具(raw 域名不通时的备用)
+tools/ghapi.py        GitHub API 查询小工具
 ```
 
 ## 开发
@@ -333,6 +347,13 @@ scripts\setup.bat     # 建虚拟环境、装依赖、跑测试
 python -m pytest tests -q
 scripts\build.bat     # 打包成 dist\pc-monitor.exe
 ```
+
+**Release 是自动打的。** 推 `v*` tag 会触发 `.github/workflows/release.yml`:
+在 GitHub 的 windows runner 上跑测试 → 打包 → 算 SHA-256 → 建 Release。
+不用在本地打包再上传。
+
+`.github/workflows/ci.yml` 每次 push 和 PR 都在干净的 windows runner 上跑一遍
+测试 —— 依赖宿主机硬件的用例,只有换台干净的机器才测得准。
 
 文档:[开发记录与技术总结(v0.1)](docs/DEVELOPMENT-v0.1.md) —— 实现细节、踩过的坑、
 性能实测数据。
